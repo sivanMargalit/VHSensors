@@ -1,0 +1,222 @@
+---
+title: 'vildehaye sensors tutorials: Calculate AGL (Altitude above Ground) by Pressure'
+author: "sivan margalit"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+---
+## credits
+This code is a translation of Sivan Toledo's MATLAB code.  
+Integrating with DEM based on Eitam Arnon's code from his ViewShed application.  
+The data, contributed by Dr. Yoni Vortman and Anat Levi, of navigating study done in Hula valey at 2020
+
+## Background
+  After loading Temperature and pressure measurements from vildehaye sensors, you can calculate Altitude above Sea Level (AGL) by pressure data. 
+For this calculation we need information about the environment barometric data on same day. We can download this information from the Israely Meteorological Service (IMS)
+Accessing to IMS data requires a Token (access key).  [here a link](https://ims.gov.il/he/ObservationDataAPI) for more information.
+
+  Next step can be trasform the ASL to AGL (Altitude above Ground Level). We use DEM raster (Digital Elevation Model) to map of ground level's altitude.
+  
+### project structure
+<ol>
+<li>Data Folder:
+  <ul> 
+  <li>sqlite file of animal's localizations, which loaded from ATLAS database.</li>
+  <li>binary data from battery and barometric sensors.</li>
+  <li>excel file of meteorology stations, downloaded from IMS</li> 
+  <li>DEM folder, which contains DEM rasters</li></ul>
+</li>
+  
+<li>Function folder:
+ <ul> 
+  <li>pressure.R : contains 3 local functions, used to calculate ASL by BME information.</li>
+  <li>DEM.R : implements the functionality of transform ASL to AGL </li> 
+ </ul></li>
+<li>VHsensors_project.Rproj : R project file, define the folder, where it located, as a working folder for R project</li>
+</ol>
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(always_allow_html=TRUE)
+ims.token='f058958a-d8bd-47cc-95d7-7ecf98610e47'
+```
+## R Code sample 
+### loading libraries and local sources
+The package "toolsForAtlas" contains the methods for read binary sensors data, and access to remote database by url address.
+
+in functions folder we contains local source files contains functions, which are not in the package
+
+```{r load libraries, message = FALSE}
+library(toolsForAtlas) # useful functions for atlas users
+options("digits"=14)   # show long numbers till 14 digits
+Sys.setlocale("LC_TIME","C")  # change local date to English names
+source("functions/pressures.R", encoding = "UTF-8")
+source("functions/DEM.R", encoding = "UTF-8")
+```
+
+### loading data from binary files
+```{r extract_data_1, message=c(1:4)}
+# loading battery data
+bat_df<-read_BAT("data/tag-972001006611-BATMON.bin")
+bat_df$TAG<-"972001006611"
+head(bat_df, 4)
+
+# loading barometric pressure data (in mbar units)
+pressure_df<-read_BME("data/tag-972001006611-BME280.bin")
+pressure_df$TAG<-"972001006611"
+head(pressure_df, 4)
+```
+
+### plot baromeric data
+The file functions/pressures.R contains "plot_BME" function plotting barometric data.
+This function has 4 arguments :
+1. bme.df - is the sensor's data
+2. reference.df - optional . a data frame of environment  barometric data, as a reference. when this data frame is supply the function add it to the BME plot
+3. fromTime - optional. if it not supply the fromTime is the minimum time in the dataframe
+4. toTime - optional. if it not supply the toTime is the maximum time in the dataframe
+```{r plot_bme_1}
+bme.plot.1<-plot_BME(bme.df=pressure_df)
+bme.plot.1
+```
+
+### read local meteorologic data
+The file functions/pressures.R contains "get.ISM.data" function which download pressure and temperature data, from a close meteorologic station.  
+In this example - it uses stattion in Har-Knaan, in Tzfat 
+```{r read_IMS}
+# ims.token<- Insert token from IMS, and uncomment this line
+ism.lst<-get.ISM.data(easting=257000,
+                      northing=780000,
+                      fromTime=min(pressure_df$TIME),
+                      toTime=max(pressure_df$TIME),
+                      ims.token)
+
+ism.pressure.df<-ism.lst[["pressure"]]
+ism.temperatures.df<-ism.lst[["temeratures"]]
+hsl<-ism.lst[["hsl"]]
+
+print(sprintf("Station Heigh relative to sea level=%d meter",hsl))
+head(ism.pressure.df)
+head(ism.temperatures.df)
+```
+(If you get red warning from red.xlsx - it is harmless)
+lets plot the barometric data, including the refence data, retreived from the local IMS station
+```{r plot_bme_2}
+bme.plot.2<-plot_BME(bme.df=pressure_df, 
+                     reference.df = ism.pressure.df)
+bme.plot.2
+```
+
+### Estimate Altitude above Sea Level (ASL) by pressure
+the function sensorsPressureToAltitude() in functions/pressures.R calculate altitude, using the formula TBD
+This function has 4 arguments :
+<ol>
+<li>pressure_df - is the sensor's data</li>
+<li>ism.pressure.df - a data frame of environment  barometric data, as a reference.</li>
+<li>refTemperature - temperature drymeasurements in IMS station.</li>
+<li>refAltitude - IMS station high above sea level.</li>
+</ol>
+```{r PressureToAltitude}
+ASL.df<-sensorsPressureToAltitude(pressure=pressure_df,
+                                   refPressure=ism.pressure.df,
+                                   refTemperature=ism.temperatures.df,
+                                   refAltitude=hsl)
+```
+
+now - show the altitude plot
+```{r plot_altitude}
+ASL.df$dateTime<-as.POSIXct(ASL.df$TIME, tz="UTC", origin="1970-01-01")
+ggplot(ASL.df, aes(x=dateTime, y=ASL))+
+  labs(title="Altitude Above Sea Level",
+       y="ASL (meters)")+
+  geom_point(aes(colour = factor(TAG)), size=0.5)+
+  theme_bw()+
+  theme(legend.title = element_blank())
+```
+### integrade ASL with ATLAS TAG data  
+now read localization data:
+```{r load_atlas_data}
+atlas.df<-loadFromSQLite(dbn="data/atlas-6611.sqlite")
+glimpse(atlas.df)
+```
+dplyr::glimpse() function show each column type. 
+We recommending the following changes :
+<ul>
+<li>If TIME field is int64 , than change TIME field to double - since int64 does not handle well with compering operators</li>
+<li> delete redundant columns to compact the data frame</li>
+<li> it is nice to add dateTime + Date, too</li>
+<li> also - you can change TAG to character (or factor)</li>
+</ul>
+
+```{r organized_loc_data}
+atlas.df<-atlas.df%>%
+  dplyr::select(-c(TX, Z, DIM, VARZ, COVXZ, COVYZ))%>%
+  mutate(TIME=as.double(TIME),
+         TAG=as.character(TAG),
+         dateTime=as.POSIXct(TIME/1000, tz="UTC",origin="1970-01-01"),
+         date=as.Date(dateTime))
+         
+glimpse(atlas.df)
+```
+merge ASL data with ATLAS localizations data, by TIME
+```{r ASL_to_atlas.df}
+  addAtlasLoc <- merge(x=atlas.df%>%
+                         mutate(mergeTIME=round(TIME/1000)),
+                       y=ASL.df%>%
+                         dplyr::select(-dateTime), 
+                       by.x=c("mergeTIME","TAG"),
+                       by.y=c("TIME","TAG"),
+                       all.x=TRUE)
+  
+  head(addAtlasLoc)
+
+```
+
+### Estimate Altitude above Ground Level (AGL) by ASL
+now, we use function getAGLFromDEM() which uses the DEM file(s) uploaded to data/DEM/  to calculate AGL
+```{r ASL_to_AGL}
+  # get atlitude above ground , using DEM rasters 
+  AGL.lst<-getAGLFromDEM(addAtlasLoc)
+  
+  # the function getAGLFromDEM() return a list with 2 items
+  names(AGL.lst)
+  
+  # extract alas.based data frame from the AGL.lst
+  alt.above.ground.df<-AGL.lst[["atlas.df"]]
+  
+  
+  #show the altitude plot
+  ggplot(ASL.df, aes(x=dateTime, y=ASL))+ 
+    geom_point(color="red", size=0.5)+
+    geom_point(data=alt.above.ground.df,
+               aes(x=dateTime, y=AGL), color="blue", size=0.5)+
+    #scale_x_datetime(limits = as.POSIXct(c('2020-12-02 07:00','2020-12-02 16:00')))+
+    labs(title = "Altitude Above Ground Level",
+       y="AGL (meters)")+
+    theme_bw()+
+    theme(legend.title = element_blank())
+
+  
+  # show histogram of data's AGL
+  ggplot(alt.above.ground.df,)+
+    geom_histogram(aes(AGL))+
+    labs(title = "histogram of AGL",
+      x="AGL (meters)")+
+    theme_bw()+
+    theme(legend.title = element_blank())
+
+
+
+```
+lets show the AGL over the geographic map, with leaflet
+```{r AGL_leaflet}
+AGL_ll(alt.above.ground.df)
+
+```
+
+
